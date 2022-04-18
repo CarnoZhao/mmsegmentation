@@ -332,8 +332,8 @@ class CustomDataset(Dataset):
                 if not osp.exists(osp.dirname(result_file)):
                     os.system(f"mkdir -p {osp.dirname(result_file)}")
                 Image.fromarray(res.astype(np.uint8)).save(result_file)
-
-        return result_files, imgfile_prefix
+            result_files.append(result_file)
+        return result_files# , imgfile_prefix
 
     def get_gt_seg_map_by_idx(self, index):
         """Get one ground truth segmentation map for evaluation."""

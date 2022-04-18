@@ -18,6 +18,8 @@ def occumpy_mem(cuda_device):
     x = torch.FloatTensor(256,1024,block_mem).to(torch.device(f"cuda:{cuda_device}"))
     del x
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 occumpy_mem('0')
 occumpy_mem('1')
+occumpy_mem('2')
+occumpy_mem('3')

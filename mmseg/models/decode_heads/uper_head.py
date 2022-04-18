@@ -84,7 +84,7 @@ class UPerHead(BaseDecodeHead):
 
         return output
 
-    def forward(self, inputs):
+    def forward(self, inputs, is_pointrend=False):
         """Forward function."""
 
         inputs = self._transform_inputs(inputs)
@@ -121,7 +121,30 @@ class UPerHead(BaseDecodeHead):
                 size=fpn_outs[0].shape[2:],
                 mode='bilinear',
                 align_corners=self.align_corners)
+        if is_pointrend:
+            fpn2point = fpn_outs
         fpn_outs = torch.cat(fpn_outs, dim=1)
         output = self.fpn_bottleneck(fpn_outs)
         output = self.cls_seg(output)
+
+        if is_pointrend:
+            return output, fpn2point
+
         return output
+
+    def forward_test(self, inputs, img_metas, test_cfg, is_pointrend=False):
+        """Forward function for testing.
+
+        Args:
+            inputs (list[Tensor]): List of multi-level img features.
+            img_metas (list[dict]): List of image info dict where each dict
+                has: 'img_shape', 'scale_factor', 'flip', and may also contain
+                'filename', 'ori_shape', 'pad_shape', and 'img_norm_cfg'.
+                For details on the values of these keys see
+                `mmseg/datasets/pipelines/formatting.py:Collect`.
+            test_cfg (dict): The testing config.
+
+        Returns:
+            Tensor: Output segmentation map.
+        """
+        return self.forward(inputs, is_pointrend)
