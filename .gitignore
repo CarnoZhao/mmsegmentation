@@ -1,9 +1,10 @@
+run.sh
 docker
 results
 *.zip
 work_imgs
 work_imgs2
-weights
+*weights
 *.pth
 nohup.out
 *.ipynb
@@ -11,6 +12,12 @@ nohup.out
 __pycache__/
 *.py[cod]
 *$py.class
+data/*
+!data/tract/
+data/tract/*
+!data/tract/baseline.ipynb
+!data/tract/submission.ipynb
+!data/tract/final_solution
 
 # C extensions
 *.so
@@ -112,7 +119,6 @@ venv.bak/
 # mypy
 .mypy_cache/
 
-data
 .vscode
 .idea
 

@@ -5,11 +5,13 @@ import warnings
 from collections import OrderedDict
 from functools import reduce
 from PIL import Image
+import cv2
 
 import mmcv
 import numpy as np
 from mmcv.utils import print_log
 from prettytable import PrettyTable
+import torch
 from torch.utils.data import Dataset
 
 from mmseg.core import eval_metrics, intersect_and_union, pre_eval_to_metrics
@@ -88,19 +90,25 @@ class CustomDataset(Dataset):
                  test_mode=False,
                  ignore_index=255,
                  reduce_zero_label=False,
+                 keep_empty_prob=1.,
                  classes=None,
                  use_mosaic=False,
                  mosaic_center=(0.25, 0.75),
                  mosaic_prob=0.5,
                  palette=None,
-                 gt_seg_map_loader_cfg=None):
-        self.use_mosaic = use_mosaic
+                 gt_seg_map_loader_cfg=None,
+                 multi_label=False):
+
+        self.multi_label = multi_label
+
+        self.use_mosaic = any([_['type'] == "Mosaic" for _ in pipeline])
         if self.use_mosaic:
-            self.mosaic_prob = mosaic_prob
-            self.mosaic_center = mosaic_center
+            assert sum([_['type'] == "Mosaic" for _ in pipeline]) == 1
             mosaic_at = [_['type'] == "Mosaic" for _ in pipeline].index(True)
+            mosaic = pipeline[mosaic_at]
+            self.mosaic_prob = mosaic.get("p", 0.5)
+            self.mosaic_center = mosaic.get("center", (0.25, 0.75))
             self.load_pipeline = Compose(pipeline[:mosaic_at])
-            print(self.load_pipeline)
             self.pipeline = Compose(pipeline[mosaic_at + 1:])
         else:
             self.pipeline = Compose(pipeline)
@@ -139,6 +147,8 @@ class CustomDataset(Dataset):
         self.img_infos = self.load_annotations(self.img_dir, self.img_suffix,
                                                self.ann_dir,
                                                self.seg_map_suffix, self.split)
+        self.keep_empty_prob = keep_empty_prob
+        self.get_resample_weight()
 
     def __len__(self):
         """Total number of samples of data."""
@@ -217,6 +227,8 @@ class CustomDataset(Dataset):
         if self.test_mode:
             return self.prepare_test_img(idx)
         else:
+            if self.resample is not None:
+                idx = self.resample(idx)
             return self.prepare_train_img(idx)
 
     def prepare_train_img(self, idx):
@@ -299,7 +311,8 @@ class CustomDataset(Dataset):
         """
 
         img_info = self.img_infos[idx]
-        results = dict(img_info=img_info)
+        ann_info = self.get_ann_info(idx)
+        results = dict(img_info=img_info, ann_info=ann_info)
         self.pre_pipeline(results)
         return self.pipeline(results)
 
@@ -321,13 +334,12 @@ class CustomDataset(Dataset):
         """
         result_files = []
         for res, idx in zip(results, indices):
-            if len(res.shape) == 3:
-                result_file = osp.join(imgfile_prefix, self.img_infos[idx]["filename"][:-4] + ".npy")
+            if len(res.shape) == 3 and not np.issubdtype(res.dtype, np.integer):
+                result_file = osp.join(imgfile_prefix, self.img_infos[idx]["filename"][:-4] + ".png")
                 if not osp.exists(osp.dirname(result_file)):
                     os.system(f"mkdir -p {osp.dirname(result_file)}")
-                np.save(result_file, res.astype(np.float32))
+                cv2.imwrite(result_file, (res * 65535).astype(np.uint16))
             else:
-
                 result_file = osp.join(imgfile_prefix, self.img_infos[idx]["filename"][:-4] + ".png")
                 if not osp.exists(osp.dirname(result_file)):
                     os.system(f"mkdir -p {osp.dirname(result_file)}")
@@ -335,6 +347,25 @@ class CustomDataset(Dataset):
             result_files.append(result_file)
 
         return result_files
+
+    def get_resample_weight(self):
+        if self.multi_label and self.keep_empty_prob != 1:
+            probs = []
+            for idx in range(len(self)):
+                gt = self.get_gt_seg_map_by_idx(idx)
+                probs.append(self.keep_empty_prob if gt.sum() == 0 else 1)
+            probs = np.array(probs)
+            probs /= probs.sum()
+        else:
+            probs = None
+        self.probs = probs
+
+    def resample(self, idx):
+        if self.probs is None:
+            return idx
+        else:
+            return np.random.choice(len(self), p = self.probs)
+
 
     def get_gt_seg_map_by_idx(self, index):
         """Get one ground truth segmentation map for evaluation."""
@@ -359,7 +390,7 @@ class CustomDataset(Dataset):
             self.gt_seg_map_loader(results)
             yield results['gt_semantic_seg']
 
-    def pre_eval(self, preds, indices):
+    def pre_eval(self, preds, loss, indices):
         """Collect eval result from each iteration.
 
         Args:
@@ -382,10 +413,24 @@ class CustomDataset(Dataset):
 
         for pred, index in zip(preds, indices):
             seg_map = self.get_gt_seg_map_by_idx(index)
-            pre_eval_results.append(
-                intersect_and_union(pred, seg_map, len(self.CLASSES),
-                                    self.ignore_index, self.label_map,
-                                    self.reduce_zero_label))
+            if self.multi_label:
+                ious = []
+                for i in range(len(self.CLASSES)):
+                    iou = intersect_and_union(pred[...,i], seg_map[...,i], 2,
+                                        self.ignore_index, self.label_map,
+                                        self.reduce_zero_label)
+                    ious.append(iou)
+                ious = tuple([torch.stack([_[i] for _ in ious], 0)[:,1] for i in range(len(ious[0]))])
+                pre_eval_results.append(ious)
+            else:
+                pre_eval_results.append(
+                    intersect_and_union(pred, seg_map, len(self.CLASSES),
+                                        self.ignore_index, self.label_map,
+                                        self.reduce_zero_label))
+
+        for i in range(len(pre_eval_results)):
+            pre_eval_results[i] = list(pre_eval_results[i])
+            pre_eval_results[i].append(loss)
 
         return pre_eval_results
 
@@ -476,7 +521,7 @@ class CustomDataset(Dataset):
         """
         if isinstance(metric, str):
             metric = [metric]
-        allowed_metrics = ['mIoU', 'mDice', 'mFscore']
+        allowed_metrics = ['mIoU', 'mDice', 'mFscore', 'imDice', 'imIoU', 'imFscore']
         if not set(metric).issubset(set(allowed_metrics)):
             raise KeyError('metric {} is not supported'.format(metric))
 
@@ -507,13 +552,16 @@ class CustomDataset(Dataset):
 
         # summary table
         ret_metrics_summary = OrderedDict({
-            ret_metric: np.round(np.nanmean(ret_metric_value) * 100, 2)
+            ret_metric: (np.round(np.nanmean(ret_metric_value) * 100, 2) if "loss" not in ret_metric else np.round(np.nanmean(ret_metric_value), 5))
             for ret_metric, ret_metric_value in ret_metrics.items()
         })
 
         # each class table
         ret_metrics.pop('aAcc', None)
         ret_metrics.pop('fwIoU', None)
+        for key in list(ret_metrics.keys()):
+            if "loss" in key:
+                ret_metrics.pop(key, None)
         ret_metrics_class = OrderedDict({
             ret_metric: np.round(ret_metric_value * 100, 2)
             for ret_metric, ret_metric_value in ret_metrics.items()
@@ -532,6 +580,8 @@ class CustomDataset(Dataset):
                 summary_table_data.add_column(key, [val])
             elif key == 'fwIoU':
                 summary_table_data.add_column(key, [val])
+            elif "loss" in key:
+                summary_table_data.add_column(key, [val])
             else:
                 summary_table_data.add_column('m' + key, [val])
 
@@ -544,8 +594,10 @@ class CustomDataset(Dataset):
         for key, value in ret_metrics_summary.items():
             if key == 'aAcc':
                 eval_results[key] = value / 100.0
-            if key == 'fwIoU':
+            elif key == 'fwIoU':
                 eval_results[key] = value / 100.0
+            elif "loss" in key:
+                eval_results[key] = value
             else:
                 eval_results['m' + key] = value / 100.0
 

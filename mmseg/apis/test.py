@@ -88,20 +88,7 @@ def single_gpu_test(model,
 
     for batch_indices, data in zip(loader_indices, data_loader):
         with torch.no_grad():
-            result = model(return_loss=False, **data)
-
-        if efficient_test:
-            result = [np2tmp(_, tmpdir='.efficient_test') for _ in result]
-
-        if format_only:
-            result = dataset.format_results(
-                result, indices=batch_indices, **format_args)
-        if pre_eval:
-            # TODO: adapt samples_per_gpu > 1.
-            # only samples_per_gpu=1 valid now
-            result = dataset.pre_eval(result, indices=batch_indices)
-
-        results.extend(result)
+            result, loss = model(return_loss=False, **data)
 
         if show or out_dir:
             img_tensor = data['img'][0]
@@ -128,6 +115,20 @@ def single_gpu_test(model,
                     show=show,
                     out_file=out_file,
                     opacity=opacity)
+
+        if efficient_test:
+            result = [np2tmp(_, tmpdir='.efficient_test') for _ in result]
+
+        if format_only:
+            result = dataset.format_results(
+                result, indices=batch_indices, **format_args)
+        if pre_eval:
+            # TODO: adapt samples_per_gpu > 1.
+            # only samples_per_gpu=1 valid now
+            result = dataset.pre_eval(result, indices=batch_indices)
+            results.extend(result)
+        else:
+            results.extend(result)
 
         batch_size = len(result)
         for _ in range(batch_size):
@@ -204,7 +205,7 @@ def multi_gpu_test(model,
 
     for batch_indices, data in zip(loader_indices, data_loader):
         with torch.no_grad():
-            result = model(return_loss=False, rescale=True, **data)
+            result, loss = model(return_loss=False, rescale=True, **data)
 
         if efficient_test:
             result = [np2tmp(_, tmpdir='.efficient_test') for _ in result]
@@ -215,7 +216,7 @@ def multi_gpu_test(model,
         if pre_eval:
             # TODO: adapt samples_per_gpu > 1.
             # only samples_per_gpu=1 valid now
-            result = dataset.pre_eval(result, indices=batch_indices)
+            result = dataset.pre_eval(result, loss=loss, indices=batch_indices)
 
         results.extend(result)
 

@@ -207,6 +207,8 @@ class EncoderDecoder(BaseSegmentor):
                 size = img.shape[2:]
             else:
                 size = img_meta[0]['ori_shape'][:2]
+            if 'pad_shape' in img_meta[0] and img_meta[0]["pad_shape"] != img_meta[0]["img_shape"]:
+                seg_logit = seg_logit[...,:img_meta[0]["img_shape"][0],:img_meta[0]["img_shape"][1]]
             seg_logit = resize(
                 seg_logit,
                 size=size,
@@ -216,7 +218,7 @@ class EncoderDecoder(BaseSegmentor):
 
         return seg_logit
 
-    def inference(self, img, img_meta, rescale):
+    def inference(self, img, img_meta, rescale, **kwargs):
         """Inference with slide/whole style.
 
         Args:
@@ -239,7 +241,18 @@ class EncoderDecoder(BaseSegmentor):
             seg_logit = self.slide_inference(img, img_meta, rescale)
         else:
             seg_logit = self.whole_inference(img, img_meta, rescale)
-        output = F.softmax(seg_logit, dim=1)
+
+        losses = {}
+        if 'gt_semantic_seg' in kwargs:
+            gt_semantic_seg = kwargs['gt_semantic_seg']
+            loss_decode = self.decode_head.losses(seg_logit, gt_semantic_seg)
+
+            losses.update(add_prefix(loss_decode, 'decode'))
+
+        if not self.test_cfg.get("multi_label", False):
+            output = F.softmax(seg_logit, dim=1)
+        else:
+            output = F.sigmoid(seg_logit)
         flip = img_meta[0]['flip']
         if flip:
             flip_direction = img_meta[0]['flip_direction']
@@ -249,15 +262,21 @@ class EncoderDecoder(BaseSegmentor):
             elif flip_direction == 'vertical':
                 output = output.flip(dims=(2, ))
 
-        return output
+        return output, losses
 
-    def simple_test(self, img, img_meta, rescale=True):
+    def simple_test(self, img, img_meta, rescale=True, **kwargs):
         """Simple test with single image."""
-        seg_logit = self.inference(img, img_meta, rescale)
-        if self.test_cfg.get("logits", False):
-            seg_pred = seg_logit# .argmax(dim=1)
+        seg_logit, losses = self.inference(img, img_meta, rescale, **kwargs)
+        if self.test_cfg.get("logits", False) and self.test_cfg.get("multi_label", False):
+            seg_pred = seg_logit.permute(0, 2, 3, 1)# .argmax(dim=1)
+        elif self.test_cfg.get("logits", False):
+            seg_pred = seg_logit
         elif self.test_cfg.get("binary_thres", None) is not None:
-            seg_pred = seg_logit[:,1].sigmoid() > self.test_cfg.get("binary_thres")
+            seg_pred = seg_logit[:,1] > self.test_cfg.get("binary_thres")
+            seg_pred = seg_pred.long()
+        elif self.test_cfg.get("multi_label", False):
+            thres = self.test_cfg.get("multi_label_thres", 0.5)
+            seg_pred = (seg_logit > thres).permute(0, 2, 3, 1)
             seg_pred = seg_pred.long()
         else:
             seg_pred = seg_logit.argmax(dim=1)
@@ -268,9 +287,10 @@ class EncoderDecoder(BaseSegmentor):
         seg_pred = seg_pred.cpu().numpy()
         # unravel batch dim
         seg_pred = list(seg_pred)
-        return seg_pred
+        
+        return seg_pred, losses
 
-    def aug_test(self, imgs, img_metas, rescale=True):
+    def aug_test(self, imgs, img_metas, rescale=True, **kwargs):
         """Test with augmentations.
 
         Only rescale=True is supported.
@@ -278,19 +298,29 @@ class EncoderDecoder(BaseSegmentor):
         # aug_test rescale all imgs back to ori_shape for now
         assert rescale
         # to save memory, we get augmented seg logit inplace
-        seg_logit = self.inference(imgs[0], img_metas[0], rescale)
+        seg_logit, losses = self.inference(imgs[0], img_metas[0], rescale, **kwargs)
         for i in range(1, len(imgs)):
-            cur_seg_logit = self.inference(imgs[i], img_metas[i], rescale)
+            cur_seg_logit, cur_loss = self.inference(imgs[i], img_metas[i], rescale)
             seg_logit += cur_seg_logit
+            for k in losses:
+                losses[k] += cur_loss[k]
         seg_logit /= len(imgs)
-        if self.test_cfg.get("logits", False):
-            seg_pred = seg_logit# .argmax(dim=1)
+        for k in losses:
+            losses[k] /= len(imgs)
+        if self.test_cfg.get("logits", False) and self.test_cfg.get("multi_label", False):
+            seg_pred = seg_logit.permute(0, 2, 3, 1)# .argmax(dim=1)
+        elif self.test_cfg.get("logits", False):
+            seg_pred = seg_logit
         elif self.test_cfg.get("binary_thres", None) is not None:
-            seg_pred = seg_logit.softmax(dim=1)[:,1] > self.test_cfg.get("binary_thres")
+            seg_pred = seg_logit[:,1] > self.test_cfg.get("binary_thres")
+            seg_pred = seg_pred.long()
+        elif self.test_cfg.get("multi_label", False):
+            thres = self.test_cfg.get("multi_label_thres", 0.5)
+            seg_pred = (seg_logit > thres).permute(0, 2, 3, 1)
             seg_pred = seg_pred.long()
         else:
             seg_pred = seg_logit.argmax(dim=1)
         seg_pred = seg_pred.cpu().numpy()
         # unravel batch dim
         seg_pred = list(seg_pred)
-        return seg_pred
+        return seg_pred, losses
